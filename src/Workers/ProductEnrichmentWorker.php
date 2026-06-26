@@ -5,56 +5,59 @@ declare(strict_types=1);
 
 /**
  * THE HERITAGE EDIT — AI Product Enrichment Worker
+ * Pure PHP — zero dependencies.
  *
- * Run: php src/Workers/ProductEnrichmentWorker.php
- * Or schedule: * * * * * php /path/to/src/Workers/ProductEnrichmentWorker.php >> /var/log/heritage_worker.log 2>&1
+ * Run manually:  php src/Workers/ProductEnrichmentWorker.php
+ * Cron (every minute):
+ *   * * * * * php /var/www/heritage-edit/src/Workers/ProductEnrichmentWorker.php >> /var/log/heritage_ai.log 2>&1
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+define('APP_ROOT', dirname(__DIR__, 2));
 
-use Dotenv\Dotenv;
+require APP_ROOT . '/src/Core/Autoloader.php';
+
+use HeritageEdit\Core\Env;
 use HeritageEdit\Core\Database;
 use HeritageEdit\Services\AIEnrichmentService;
 
-$dotenv = Dotenv::createImmutable(__DIR__ . '/../../');
-$dotenv->load();
+Env::load(APP_ROOT . '/.env');
 
-$db      = Database::getInstance();
-$service = new AIEnrichmentService();
-
-$batchSize = 5;
+$db          = Database::getInstance();
+$service     = new AIEnrichmentService();
+$batchSize   = 5;
 $maxAttempts = 3;
 
-echo "[" . date('Y-m-d H:i:s') . "] Heritage Edit AI Worker starting...\n";
+$ts = fn() => '[' . date('Y-m-d H:i:s') . ']';
 
-// Pick pending jobs
+echo $ts() . " Heritage Edit AI Worker starting...\n";
+
 $jobs = $db->fetchAll(
-    "SELECT j.id, j.product_id, j.attempts
-     FROM ai_job_queue j
-     WHERE j.status = 'pending' AND j.attempts < ?
-     ORDER BY j.scheduled_at ASC
+    "SELECT id, product_id, attempts
+     FROM ai_job_queue
+     WHERE status = 'pending' AND attempts < ?
+     ORDER BY scheduled_at ASC
      LIMIT ?",
     [$maxAttempts, $batchSize]
 );
 
 if (empty($jobs)) {
-    echo "[" . date('Y-m-d H:i:s') . "] No pending jobs. Exiting.\n";
+    echo $ts() . " No pending jobs. Exiting.\n";
     exit(0);
 }
 
-echo "[" . date('Y-m-d H:i:s') . "] Processing " . count($jobs) . " job(s)...\n";
+echo $ts() . " Processing " . count($jobs) . " job(s)...\n";
 
 foreach ($jobs as $job) {
-    $productId = $job['product_id'];
+    $productId  = $job['product_id'];
+    $attempts   = (int) $job['attempts'] + 1;
 
-    // Mark as processing
     $db->update('ai_job_queue', [
         'status'     => 'processing',
         'started_at' => date('Y-m-d H:i:s'),
-        'attempts'   => $job['attempts'] + 1,
+        'attempts'   => $attempts,
     ], 'id = ?', [$job['id']]);
 
-    echo "[" . date('Y-m-d H:i:s') . "] Enriching product: $productId\n";
+    echo $ts() . " Enriching product: $productId (attempt $attempts)\n";
 
     try {
         $success = $service->enrich($productId);
@@ -64,25 +67,25 @@ foreach ($jobs as $job) {
                 'status'      => 'done',
                 'finished_at' => date('Y-m-d H:i:s'),
             ], 'id = ?', [$job['id']]);
-            echo "[" . date('Y-m-d H:i:s') . "] ✓ Done: $productId\n";
+            echo $ts() . " ✓ Done: $productId\n";
         } else {
+            $newStatus = ($attempts >= $maxAttempts) ? 'failed' : 'pending';
             $db->update('ai_job_queue', [
-                'status' => ($job['attempts'] + 1 >= $maxAttempts) ? 'failed' : 'pending',
+                'status' => $newStatus,
                 'error'  => 'Enrichment returned false',
             ], 'id = ?', [$job['id']]);
-            echo "[" . date('Y-m-d H:i:s') . "] ✗ Failed (non-exception): $productId\n";
+            echo $ts() . " ✗ Failed (no exception): $productId → $newStatus\n";
         }
     } catch (\Throwable $e) {
-        $status = ($job['attempts'] + 1 >= $maxAttempts) ? 'failed' : 'pending';
+        $newStatus = ($attempts >= $maxAttempts) ? 'failed' : 'pending';
         $db->update('ai_job_queue', [
-            'status' => $status,
+            'status' => $newStatus,
             'error'  => substr($e->getMessage(), 0, 500),
         ], 'id = ?', [$job['id']]);
-        echo "[" . date('Y-m-d H:i:s') . "] ✗ Exception for $productId: " . $e->getMessage() . "\n";
+        echo $ts() . " ✗ Exception for $productId: " . $e->getMessage() . "\n";
     }
 
-    // Respect rate limits
-    usleep(500_000); // 0.5s between calls
+    usleep(500_000); // 0.5s between API calls
 }
 
-echo "[" . date('Y-m-d H:i:s') . "] Worker cycle complete.\n";
+echo $ts() . " Worker cycle complete.\n";

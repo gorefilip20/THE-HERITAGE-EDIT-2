@@ -6,7 +6,7 @@ namespace HeritageEdit\Models;
 
 use HeritageEdit\Core\Database;
 use HeritageEdit\Core\Session;
-use Ramsey\Uuid\Uuid;
+use HeritageEdit\Core\Uuid;
 
 final class Cart
 {
@@ -29,7 +29,7 @@ final class Cart
             if ($cart) return $cart;
         }
 
-        $cartId = Uuid::uuid4()->toString();
+        $cartId = Uuid::v4();
         $this->db->insert('carts', [
             'id'         => $cartId,
             'user_id'    => Session::userId(),
@@ -46,24 +46,24 @@ final class Cart
     {
         $cart = $this->getOrCreate();
 
-        // Get unit price
         $product = $this->db->fetch(
             'SELECT COALESCE(sale_price, base_price) AS price FROM products WHERE id = ?',
             [$productId]
         );
         if (!$product) throw new \InvalidArgumentException('Product not found');
 
-        $priceDelta = 0;
+        $priceDelta = 0.0;
         if ($variantId) {
-            $variant = $this->db->fetch('SELECT price_delta FROM product_variants WHERE id = ?', [$variantId]);
+            $variant    = $this->db->fetch('SELECT price_delta FROM product_variants WHERE id = ?', [$variantId]);
             $priceDelta = (float) ($variant['price_delta'] ?? 0);
         }
 
         $unitPrice = (float) $product['price'] + $priceDelta;
 
-        // Check if already in cart
         $existing = $this->db->fetch(
-            'SELECT id, quantity FROM cart_items WHERE cart_id = ? AND product_id = ? AND (variant_id = ? OR (variant_id IS NULL AND ? IS NULL))',
+            'SELECT id, quantity FROM cart_items
+             WHERE cart_id = ? AND product_id = ?
+               AND (variant_id = ? OR (variant_id IS NULL AND ? IS NULL))',
             [$cart['id'], $productId, $variantId, $variantId]
         );
 
@@ -71,7 +71,7 @@ final class Cart
             $this->db->update('cart_items', ['quantity' => $existing['quantity'] + $qty], 'id = ?', [$existing['id']]);
         } else {
             $this->db->insert('cart_items', [
-                'id'         => Uuid::uuid4()->toString(),
+                'id'         => Uuid::v4(),
                 'cart_id'    => $cart['id'],
                 'product_id' => $productId,
                 'variant_id' => $variantId,
@@ -107,10 +107,9 @@ final class Cart
     public function getCartWithItems(?string $cartId = null): array
     {
         if (!$cartId) {
-            $c = $this->db->fetch('SELECT id FROM carts WHERE id = ?', [Session::get('cart_id')]);
+            $c      = $this->db->fetch('SELECT id FROM carts WHERE id = ?', [Session::get('cart_id')]);
             $cartId = $c['id'] ?? null;
         }
-
         if (!$cartId) return ['items' => [], 'subtotal' => 0, 'item_count' => 0];
 
         $items = $this->db->fetchAll(
@@ -121,8 +120,8 @@ final class Cart
                     (SELECT url FROM product_images pi WHERE pi.product_id = p.id AND pi.is_primary = 1 LIMIT 1) AS image
              FROM cart_items ci
              JOIN products p ON p.id = ci.product_id
-             LEFT JOIN brands b ON b.id = p.brand_id
-             LEFT JOIN product_variants v ON v.id = ci.variant_id
+             LEFT JOIN brands b             ON b.id = p.brand_id
+             LEFT JOIN product_variants v   ON v.id = ci.variant_id
              WHERE ci.cart_id = ?
              ORDER BY ci.added_at DESC",
             [$cartId]

@@ -4,52 +4,55 @@ declare(strict_types=1);
 
 namespace HeritageEdit\Services;
 
-use GuzzleHttp\Client;
+use HeritageEdit\Core\HttpClient;
+use HeritageEdit\Core\Env;
 
 final class PaystackService
 {
-    private Client $http;
-    private array $config;
+    private HttpClient $http;
+    private string $secretKey;
+    private string $webhookSecret;
+    private const BASE = 'https://api.paystack.co';
 
     public function __construct()
     {
-        $services    = require __DIR__ . '/../../config/services.php';
-        $this->config = $services['paystack'];
-        $this->http   = new Client([
-            'base_uri' => $this->config['base_url'],
-            'timeout'  => 30,
-            'headers'  => [
-                'Authorization' => 'Bearer ' . $this->config['secret_key'],
+        $this->secretKey     = Env::get('PAYSTACK_SECRET_KEY', '');
+        $this->webhookSecret = Env::get('PAYSTACK_WEBHOOK_SECRET', '');
+        $this->http = new HttpClient([
+            'timeout' => 30,
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->secretKey,
                 'Content-Type'  => 'application/json',
             ],
         ]);
     }
 
     /**
-     * Initialize a Paystack transaction.
+     * Initialize a transaction.
      * Returns ['authorization_url', 'access_code', 'reference'].
      */
     public function initialize(
         string $email,
-        int $amountKobo,
+        int    $amountKobo,
         string $reference,
         string $currency = 'NGN',
-        array $metadata = []
+        array  $metadata = []
     ): array {
-        $response = $this->http->post('/transaction/initialize', [
-            'json' => [
-                'email'     => $email,
-                'amount'    => $amountKobo,
-                'reference' => $reference,
-                'currency'  => $currency,
-                'metadata'  => $metadata,
-                'callback_url' => rtrim(config('app.url'), '/') . '/checkout/verify',
-            ],
-        ]);
+        $callbackUrl = rtrim(Env::get('APP_URL', ''), '/') . '/checkout/verify';
 
-        $body = json_decode((string) $response->getBody(), true);
-        if (!$body['status']) {
-            throw new \RuntimeException('Paystack init failed: ' . ($body['message'] ?? 'Unknown'));
+        $response = $this->http->post(self::BASE . '/transaction/initialize', [
+            'email'        => $email,
+            'amount'       => $amountKobo,
+            'reference'    => $reference,
+            'currency'     => $currency,
+            'metadata'     => $metadata,
+            'callback_url' => $callbackUrl,
+        ])->throw();
+
+        $body = $response->json();
+
+        if (!($body['status'] ?? false)) {
+            throw new \RuntimeException('Paystack init failed: ' . ($body['message'] ?? 'Unknown error'));
         }
 
         return $body['data'];
@@ -60,36 +63,38 @@ final class PaystackService
      */
     public function verify(string $reference): array
     {
-        $response = $this->http->get('/transaction/verify/' . rawurlencode($reference));
-        $body     = json_decode((string) $response->getBody(), true);
+        $response = $this->http->get(
+            self::BASE . '/transaction/verify/' . rawurlencode($reference)
+        )->throw();
 
-        if (!$body['status']) {
-            throw new \RuntimeException('Paystack verify failed: ' . ($body['message'] ?? 'Unknown'));
+        $body = $response->json();
+
+        if (!($body['status'] ?? false)) {
+            throw new \RuntimeException('Paystack verify failed: ' . ($body['message'] ?? 'Unknown error'));
         }
 
         return $body['data'];
     }
 
     /**
-     * Validate Paystack webhook signature.
+     * Validate Paystack webhook HMAC-SHA512 signature.
      */
     public function validateWebhook(string $payload, string $signature): bool
     {
-        $expected = hash_hmac('sha512', $payload, $this->config['webhook_secret']);
+        $expected = hash_hmac('sha512', $payload, $this->webhookSecret);
         return hash_equals($expected, $signature);
     }
 
     /**
-     * Convert decimal amount to Paystack kobo/cents (smallest unit).
+     * Convert decimal amount to Paystack smallest unit (kobo/cents).
      */
-    public static function toSubunit(float $amount, string $currency = 'NGN'): int
+    public static function toSubunit(float $amount): int
     {
-        // All Paystack currencies use 100-based subunits
         return (int) round($amount * 100);
     }
 
     /**
-     * Generate a unique payment reference.
+     * Generate a cryptographically random payment reference.
      */
     public static function generateReference(string $prefix = 'THE'): string
     {

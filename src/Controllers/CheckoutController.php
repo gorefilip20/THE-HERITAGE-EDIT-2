@@ -34,11 +34,9 @@ final class CheckoutController
         if (empty($cartData['items'])) {
             Response::redirect('/cart');
         }
-
-        $config = require __DIR__ . '/../../config/services.php';
         Response::view('pages/checkout', [
-            'cart'              => $cartData,
-            'paystack_pub_key'  => $config['paystack']['public_key'],
+            'cart'             => $cartData,
+            'paystack_pub_key' => \HeritageEdit\Core\Env::get('PAYSTACK_PUBLIC_KEY', ''),
         ]);
     }
 
@@ -49,11 +47,8 @@ final class CheckoutController
         $country = strtoupper($data['country'] ?? 'NG');
         $weight  = (int) ($data['weight_grams'] ?? 500);
 
-        $rates       = $this->shipping->getRates($data, $weight);
-        $landedCost  = $this->shipping->calculateLandedCost(
-            (float) ($data['subtotal'] ?? 0),
-            $country
-        );
+        $rates      = $this->shipping->getRates($data, $weight);
+        $landedCost = $this->shipping->calculateLandedCost((float) ($data['subtotal'] ?? 0), $country);
 
         Response::json(['rates' => $rates, 'landed_cost' => $landedCost]);
     }
@@ -68,43 +63,40 @@ final class CheckoutController
             Response::json(['error' => 'Cart is empty'], 422);
         }
 
-        $email     = filter_var($data['email'] ?? '', FILTER_VALIDATE_EMAIL);
+        $email = filter_var($data['email'] ?? '', FILTER_VALIDATE_EMAIL);
         if (!$email) {
             Response::json(['error' => 'Valid email required'], 422);
         }
 
-        $currency      = strtoupper($data['currency'] ?? 'NGN');
-        $subtotal      = (float) $cartData['subtotal'];
-        $shippingCost  = (float) ($data['shipping_cost']  ?? 0);
-        $dutiesTaxes   = (float) ($data['duties_taxes']   ?? 0);
-        $discount      = (float) ($data['discount_amount'] ?? 0);
-        $total         = $subtotal + $shippingCost + $dutiesTaxes - $discount;
+        $currency     = strtoupper($data['currency']      ?? 'NGN');
+        $subtotal     = (float) $cartData['subtotal'];
+        $shippingCost = (float) ($data['shipping_cost']   ?? 0);
+        $dutiesTaxes  = (float) ($data['duties_taxes']    ?? 0);
+        $discount     = (float) ($data['discount_amount'] ?? 0);
+        $total        = $subtotal + $shippingCost + $dutiesTaxes - $discount;
 
         try {
-            // Create the order (pending payment)
             $orderId = $this->order->createFromCart($cartData, array_merge($data, [
-                'user_id'      => Session::userId(),
-                'guest_email'  => $email,
-                'subtotal'     => $subtotal,
-                'shipping_cost'=> $shippingCost,
-                'duties_taxes' => $dutiesTaxes,
-                'discount_amount' => $discount,
-                'currency'     => $currency,
+                'user_id'        => Session::userId(),
+                'guest_email'    => $email,
+                'subtotal'       => $subtotal,
+                'shipping_cost'  => $shippingCost,
+                'duties_taxes'   => $dutiesTaxes,
+                'discount_amount'=> $discount,
+                'currency'       => $currency,
             ]));
 
-            // Initialize Paystack
             $reference  = PaystackService::generateReference();
-            $amountKobo = PaystackService::toSubunit($total, $currency);
+            $amountUnit = PaystackService::toSubunit($total);
 
             $txData = $this->paystack->initialize(
-                email: $email,
-                amountKobo: $amountKobo,
-                reference: $reference,
-                currency: $currency,
-                metadata: ['order_id' => $orderId, 'order_total' => $total]
+                email:       $email,
+                amountKobo:  $amountUnit,
+                reference:   $reference,
+                currency:    $currency,
+                metadata:    ['order_id' => $orderId, 'order_total' => $total]
             );
 
-            // Store reference in session for verification
             Session::set('pending_order_id', $orderId);
             Session::set('pending_reference', $reference);
 
@@ -116,7 +108,7 @@ final class CheckoutController
                 'access_code'       => $txData['access_code'],
             ]);
         } catch (\Throwable $e) {
-            error_log('[Checkout] Init error: ' . $e->getMessage());
+            error_log('[Checkout] Initialize error: ' . $e->getMessage());
             Response::json(['error' => 'Payment initialization failed. Please try again.'], 500);
         }
     }
@@ -134,14 +126,11 @@ final class CheckoutController
         try {
             $tx = $this->paystack->verify($reference);
 
-            if ($tx['status'] === 'success') {
+            if (($tx['status'] ?? '') === 'success') {
                 $this->order->updatePaymentStatus($orderId, 'paid', $reference);
 
-                // Clear cart
                 $cartId = Session::get('cart_id');
-                if ($cartId) {
-                    $this->cart->clear($cartId);
-                }
+                if ($cartId) $this->cart->clear($cartId);
 
                 Session::forget('pending_order_id');
                 Session::forget('pending_reference');
@@ -173,7 +162,7 @@ final class CheckoutController
             $meta    = $event['data']['metadata'] ?? [];
             $orderId = $meta['order_id'] ?? null;
             if ($orderId) {
-                $this->order->updatePaymentStatus($orderId, 'paid', $event['data']['reference']);
+                $this->order->updatePaymentStatus($orderId, 'paid', $event['data']['reference'] ?? '');
             }
         }
 

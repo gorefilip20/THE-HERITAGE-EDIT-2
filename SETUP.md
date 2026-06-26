@@ -1,124 +1,136 @@
 # THE HERITAGE EDIT — Setup Guide
 
-## Prerequisites
-- PHP 8.1+
+## Requirements
+- PHP 8.1+ with extensions: `pdo_mysql`, `curl`, `json`, `mbstring`, `openssl`
 - MySQL 8.0+
-- Composer
-- Node.js (optional, for Tailwind CLI build)
-- A Paystack account (live or test)
-- An EasyPost account (for live shipping rates)
-- Anthropic API key (Claude)
+- **No Composer. No npm. Zero external dependencies.**
 
 ---
 
-## 1. Clone & Install
+## 1. Clone & Configure
 
 ```bash
-git clone <repo-url> heritage-edit
+git clone https://github.com/gorefilip20/THE-HERITAGE-EDIT-2.git heritage-edit
 cd heritage-edit
-composer install
 cp .env.example .env
+# Fill in all values in .env
 ```
 
-## 2. Configure `.env`
-
-Fill in every value in `.env`:
-- `APP_KEY` — generate with: `php -r "echo base64_encode(random_bytes(32));"`
-- `DB_*` — your MySQL credentials
-- `PAYSTACK_*` — from your Paystack dashboard
-- `EASYPOST_API_KEY` — from EasyPost
-- `ANTHROPIC_API_KEY` — from Anthropic Console
-
-## 3. Database Setup
+## 2. Database Setup
 
 ```bash
 mysql -u root -p < database/schema.sql
 ```
 
-## 4. Web Server
+## 3. Web Server
 
-**Development (built-in PHP server):**
+**Development (PHP built-in server):**
 ```bash
 php -S localhost:8000 -t public/
 ```
 
-**Production:** Use the provided `nginx.conf`. Point the document root to `public/`.
+**Production:** Configure Nginx using the provided `nginx.conf`.
+Point document root to `public/`. All requests route through `public/index.php`.
 
-## 5. AI Enrichment Worker
+## 4. File Permissions
 
-Run as a cron job (every minute):
+```bash
+mkdir -p public/assets/images/products
+chmod -R 755 public/assets/images/
 ```
-* * * * * /usr/bin/php /var/www/heritage-edit/src/Workers/ProductEnrichmentWorker.php >> /var/log/heritage_ai.log 2>&1
+
+## 5. AI Enrichment Worker (cron)
+
+```
+* * * * * php /var/www/heritage-edit/src/Workers/ProductEnrichmentWorker.php >> /var/log/heritage_ai.log 2>&1
 ```
 
 Or run manually:
 ```bash
-composer run worker
-```
-
-## 6. Directory Permissions
-
-```bash
-chmod -R 755 public/assets/images/
+php src/Workers/ProductEnrichmentWorker.php
 ```
 
 ---
 
-## Architecture Overview
+## Architecture — Pure PHP 8, Zero Dependencies
 
 ```
 heritage-edit/
-├── public/             # Web root (index.php + assets)
+├── public/
+│   ├── index.php           # Entry point — bootstraps autoloader, env, router
+│   ├── .htaccess           # Apache rewrite + security headers
+│   └── assets/js/app.js   # Frontend cart/checkout/filter state machine
+│
 ├── src/
-│   ├── Core/           # Router, Database, Request, Response, Session
-│   ├── Controllers/    # Product, Cart, Checkout, Admin
-│   ├── Models/         # Product, Cart, Order
-│   ├── Services/       # Paystack, Shipping (EasyPost), AI Enrichment
-│   └── Workers/        # ProductEnrichmentWorker (CLI)
+│   ├── Core/
+│   │   ├── Autoloader.php  # PSR-4 autoloader (replaces Composer)
+│   │   ├── Env.php         # .env parser (replaces vlucas/phpdotenv)
+│   │   ├── Uuid.php        # UUID v4 via random_bytes (replaces ramsey/uuid)
+│   │   ├── HttpClient.php  # cURL HTTP client (replaces guzzlehttp/guzzle)
+│   │   ├── Database.php    # PDO singleton
+│   │   ├── Router.php      # Pattern-matching router
+│   │   ├── Request.php     # HTTP request abstraction
+│   │   ├── Response.php    # JSON + view renderer
+│   │   └── Session.php     # Secure session wrapper
+│   │
+│   ├── Controllers/
+│   │   ├── ProductController.php   # Home, catalog (PLP), PDP
+│   │   ├── CartController.php      # Cart API endpoints
+│   │   ├── CheckoutController.php  # 3-step checkout + Paystack + webhook
+│   │   └── AdminController.php     # Dashboard, products, orders
+│   │
+│   ├── Models/
+│   │   ├── Product.php     # Catalog queries, AI queue, enrichment
+│   │   ├── Cart.php        # Session-aware cart state
+│   │   └── Order.php       # Transactional order creation
+│   │
+│   ├── Services/
+│   │   ├── PaystackService.php     # Payment gateway (cURL)
+│   │   ├── ShippingService.php     # EasyPost rates + landed cost (cURL)
+│   │   └── AIEnrichmentService.php # Anthropic Claude enrichment (cURL)
+│   │
+│   └── Workers/
+│       └── ProductEnrichmentWorker.php  # CLI AI enrichment daemon
+│
 ├── templates/
-│   ├── layout/         # base.php, header.php, footer.php
-│   ├── pages/          # home, catalog, product, checkout, confirmation
-│   ├── admin/          # dashboard, products, orders, product-form
-│   └── components/     # product-card
-├── config/             # app, database, services
-└── database/           # schema.sql
+│   ├── layout/   base.php, header.php, footer.php
+│   ├── pages/    home, catalog, product (PDP), checkout, order-confirmation
+│   ├── admin/    dashboard, product-form, orders
+│   └── components/ product-card.php
+│
+├── config/       app.php, database.php, services.php
+├── database/     schema.sql  (14 tables, full MySQL 8 schema)
+├── nginx.conf
+└── .env.example
 ```
 
 ## Key Routes
 
-| Method | Path                        | Description              |
-|--------|-----------------------------|--------------------------|
-| GET    | /                           | Home page                |
-| GET    | /shop                       | Product catalog (PLP)    |
-| GET    | /product/{slug}             | Product detail (PDP)     |
-| GET    | /cart                       | Cart page                |
-| POST   | /api/cart/add               | Add item to cart         |
-| POST   | /api/cart/update            | Update cart item qty     |
-| POST   | /api/cart/remove            | Remove cart item         |
-| GET    | /checkout                   | Checkout page            |
-| POST   | /api/shipping/rates         | Get live shipping rates  |
-| POST   | /api/checkout/initialize    | Initialize Paystack tx   |
-| GET    | /checkout/verify            | Verify payment callback  |
-| POST   | /api/webhooks/paystack      | Paystack webhook         |
-| GET    | /admin                      | Admin dashboard          |
-| GET    | /admin/products/new         | Create product form      |
-| POST   | /admin/products             | Store product            |
+| Method | Path                        | Handler                          |
+|--------|-----------------------------|----------------------------------|
+| GET    | /                           | Home (featured + new arrivals)   |
+| GET    | /shop                       | Catalog with filter sidebar      |
+| GET    | /product/{slug}             | PDP with Heritage Narrative      |
+| GET    | /api/cart                   | Cart state (JSON)                |
+| POST   | /api/cart/add               | Add item                         |
+| POST   | /api/cart/update            | Update quantity                  |
+| POST   | /api/cart/remove            | Remove item                      |
+| GET    | /checkout                   | 3-step checkout page             |
+| POST   | /api/shipping/rates         | EasyPost rates + landed cost     |
+| POST   | /api/checkout/initialize    | Create order + Paystack init     |
+| GET    | /checkout/verify            | Paystack callback verification   |
+| POST   | /api/webhooks/paystack      | Paystack webhook (server-side)   |
+| GET    | /admin                      | Admin dashboard                  |
+| GET    | /admin/products/new         | Product upload form              |
+| POST   | /admin/products             | Store product + queue AI         |
 
-## The Heritage AI Engine
+## PHP Extension Checklist
 
-When a product is created via `/admin/products/new`:
-1. A record is inserted into `ai_job_queue` with `status = 'pending'`
-2. The worker (`ProductEnrichmentWorker.php`) picks it up on next cron run
-3. It calls the Anthropic API with a structured luxury editorial prompt
-4. The response is parsed and stored in `product_enrichments`
-5. The PDP renders it in the "Heritage Narrative" tabbed component
+```bash
+php -m | grep -E "pdo_mysql|curl|json|mbstring|openssl"
+```
 
-## Payment Flow (Paystack)
-
-1. Customer fills info → shipping → clicks "Pay Securely"
-2. `POST /api/checkout/initialize` → creates Order (status: pending) → initializes Paystack
-3. Paystack inline popup opens → customer pays
-4. On success → `GET /checkout/verify?reference=xxx` → verifies with Paystack API
-5. Order status updated to `confirmed`, payment_status to `paid`
-6. Cart cleared → Order Confirmation page shown
-7. Webhook at `/api/webhooks/paystack` provides server-side confirmation backup
+All five must appear. On Ubuntu/Debian:
+```bash
+sudo apt install php8.1-mysql php8.1-curl php8.1-mbstring
+```

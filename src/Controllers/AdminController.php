@@ -8,8 +8,8 @@ use HeritageEdit\Core\Database;
 use HeritageEdit\Core\Request;
 use HeritageEdit\Core\Response;
 use HeritageEdit\Core\Session;
+use HeritageEdit\Core\Uuid;
 use HeritageEdit\Models\Product;
-use Ramsey\Uuid\Uuid;
 
 final class AdminController
 {
@@ -67,7 +67,7 @@ final class AdminController
 
     public function createProductForm(Request $request): void
     {
-        $brands     = $this->db->fetchAll('SELECT id, name FROM brands WHERE is_active = 1 ORDER BY name');
+        $brands     = $this->db->fetchAll('SELECT id, name FROM brands     WHERE is_active = 1 ORDER BY name');
         $categories = $this->db->fetchAll('SELECT id, name FROM categories WHERE is_active = 1 ORDER BY name');
         Response::view('admin/product-form', compact('brands', 'categories'));
     }
@@ -77,28 +77,29 @@ final class AdminController
         $data = $request->all();
 
         $productModel = new Product();
-        $productId = $productModel->create([
-            'title'        => trim($data['title'] ?? ''),
-            'brand_id'     => $data['brand_id']     ? (int) $data['brand_id']    : null,
-            'category_id'  => $data['category_id']  ? (int) $data['category_id'] : null,
-            'gender'       => $data['gender']        ?? 'women',
-            'base_price'   => (float) ($data['base_price'] ?? 0),
-            'sale_price'   => !empty($data['sale_price']) ? (float) $data['sale_price'] : null,
-            'currency'     => $data['currency']      ?? 'NGN',
-            'status'       => $data['status']        ?? 'draft',
-            'weight_grams' => !empty($data['weight_grams']) ? (int) $data['weight_grams'] : null,
+        $productId    = $productModel->create([
+            'title'        => trim($data['title']        ?? ''),
+            'brand_id'     => !empty($data['brand_id'])     ? (int) $data['brand_id']     : null,
+            'category_id'  => !empty($data['category_id'])  ? (int) $data['category_id']  : null,
+            'gender'       => $data['gender']                ?? 'women',
+            'base_price'   => (float) ($data['base_price']  ?? 0),
+            'sale_price'   => !empty($data['sale_price'])    ? (float) $data['sale_price'] : null,
+            'currency'     => $data['currency']              ?? 'NGN',
+            'status'       => $data['status']                ?? 'draft',
+            'weight_grams' => !empty($data['weight_grams'])  ? (int) $data['weight_grams'] : null,
         ]);
 
-        // Handle image uploads
+        // Image uploads
         if (!empty($_FILES['images']['tmp_name'])) {
             $this->storeImages($productId, $_FILES['images']);
         }
 
-        // Handle variants
+        // Variants
         if (!empty($data['variants'])) {
-            foreach (json_decode($data['variants'], true) as $variant) {
+            $variants = json_decode($data['variants'], true) ?? [];
+            foreach ($variants as $variant) {
                 $this->db->insert('product_variants', [
-                    'id'         => Uuid::uuid4()->toString(),
+                    'id'         => Uuid::v4(),
                     'product_id' => $productId,
                     'size'       => $variant['size']      ?? null,
                     'color'      => $variant['color']     ?? null,
@@ -110,32 +111,6 @@ final class AdminController
 
         Session::flash('success', 'Product created. AI enrichment queued.');
         Response::redirect('/admin/products');
-    }
-
-    private function storeImages(string $productId, array $files): void
-    {
-        $uploadDir = __DIR__ . '/../../public/assets/images/products/' . $productId . '/';
-        if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
-
-        $names = (array) $files['name'];
-        $tmps  = (array) $files['tmp_name'];
-
-        foreach ($names as $i => $name) {
-            if (empty($tmps[$i])) continue;
-            $ext      = strtolower(pathinfo($name, PATHINFO_EXTENSION));
-            $allowed  = ['jpg', 'jpeg', 'png', 'webp'];
-            if (!in_array($ext, $allowed)) continue;
-
-            $filename = Uuid::uuid4()->toString() . '.' . $ext;
-            move_uploaded_file($tmps[$i], $uploadDir . $filename);
-
-            $this->db->insert('product_images', [
-                'product_id' => $productId,
-                'url'        => '/assets/images/products/' . $productId . '/' . $filename,
-                'sort_order' => $i,
-                'is_primary' => (int) ($i === 0),
-            ]);
-        }
     }
 
     public function orders(Request $request): void
@@ -160,11 +135,33 @@ final class AdminController
              WHERE o.id = ?",
             [$id]
         );
-        if (!$order) Response::abort(404);
-
-        $order['items'] = $this->db->fetchAll(
-            'SELECT * FROM order_items WHERE order_id = ?', [$id]
-        );
+        if (!$order) Response::abort(404, 'Order not found');
+        $order['items'] = $this->db->fetchAll('SELECT * FROM order_items WHERE order_id = ?', [$id]);
         Response::view('admin/order-detail', compact('order'));
+    }
+
+    private function storeImages(string $productId, array $files): void
+    {
+        $uploadDir = APP_ROOT . '/public/assets/images/products/' . $productId . '/';
+        if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+
+        $names = (array) $files['name'];
+        $tmps  = (array) $files['tmp_name'];
+
+        foreach ($names as $i => $name) {
+            if (empty($tmps[$i])) continue;
+            $ext     = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+            if (!in_array($ext, ['jpg', 'jpeg', 'png', 'webp'], true)) continue;
+
+            $filename = Uuid::v4() . '.' . $ext;
+            move_uploaded_file($tmps[$i], $uploadDir . $filename);
+
+            $this->db->insert('product_images', [
+                'product_id' => $productId,
+                'url'        => '/assets/images/products/' . $productId . '/' . $filename,
+                'sort_order' => $i,
+                'is_primary' => (int) ($i === 0),
+            ]);
+        }
     }
 }

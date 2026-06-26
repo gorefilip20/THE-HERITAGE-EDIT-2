@@ -4,21 +4,32 @@ declare(strict_types=1);
 
 namespace HeritageEdit\Services;
 
-use GuzzleHttp\Client;
 use HeritageEdit\Core\Database;
+use HeritageEdit\Core\HttpClient;
+use HeritageEdit\Core\Env;
 
 final class AIEnrichmentService
 {
-    private Client $http;
-    private array $config;
+    private HttpClient $http;
+    private string $apiKey;
+    private string $model;
+    private string $baseUrl;
     private Database $db;
 
     public function __construct()
     {
-        $services    = require __DIR__ . '/../../config/services.php';
-        $this->config = $services['anthropic'];
-        $this->db     = Database::getInstance();
-        $this->http   = new Client(['timeout' => 60]);
+        $this->apiKey  = Env::get('ANTHROPIC_API_KEY', '');
+        $this->model   = Env::get('ANTHROPIC_MODEL', 'claude-sonnet-4-6');
+        $this->baseUrl = 'https://api.anthropic.com/v1';
+        $this->db      = Database::getInstance();
+        $this->http    = new HttpClient([
+            'timeout' => 60,
+            'headers' => [
+                'x-api-key'         => $this->apiKey,
+                'anthropic-version' => '2023-06-01',
+                'content-type'      => 'application/json',
+            ],
+        ]);
     }
 
     public function enrich(string $productId): bool
@@ -34,53 +45,40 @@ final class AIEnrichmentService
 
         if (!$product) return false;
 
-        $prompt = $this->buildPrompt($product);
+        $payload = [
+            'model'      => $this->model,
+            'max_tokens' => 2000,
+            'system'     => $this->systemPrompt(),
+            'messages'   => [['role' => 'user', 'content' => $this->buildPrompt($product)]],
+        ];
 
         try {
-            $response = $this->http->post($this->config['base_url'] . '/messages', [
-                'headers' => [
-                    'x-api-key'         => $this->config['api_key'],
-                    'anthropic-version' => '2023-06-01',
-                    'content-type'      => 'application/json',
-                ],
-                'json' => [
-                    'model'      => $this->config['model'],
-                    'max_tokens' => $this->config['max_tokens'],
-                    'system'     => $this->systemPrompt(),
-                    'messages'   => [['role' => 'user', 'content' => $prompt]],
-                ],
-            ]);
-
-            $body = json_decode((string) $response->getBody(), true);
-            $raw  = $body['content'][0]['text'] ?? '';
-            $data = $this->parseResponse($raw);
+            $response = $this->http->post($this->baseUrl . '/messages', $payload)->throw();
+            $body     = $response->json();
+            $raw      = $body['content'][0]['text'] ?? '';
+            $data     = $this->parseResponse($raw);
 
             if (!$data) return false;
 
-            // Upsert enrichment
-            $existing = $this->db->fetch('SELECT product_id FROM product_enrichments WHERE product_id = ?', [$productId]);
+            $existing = $this->db->fetch(
+                'SELECT product_id FROM product_enrichments WHERE product_id = ?',
+                [$productId]
+            );
+
+            $row = [
+                'history_and_heritage'  => $data['history_and_heritage']  ?? null,
+                'when_to_wear'          => $data['when_to_wear']          ?? null,
+                'right_occasion'        => json_encode($data['right_occasion']        ?? []),
+                'style_recommendations' => json_encode($data['style_recommendations'] ?? []),
+                'material_story'        => $data['material_story']        ?? null,
+                'craftsmanship_notes'   => $data['craftsmanship_notes']   ?? null,
+                'raw_ai_response'       => $raw,
+            ];
 
             if ($existing) {
-                $this->db->update('product_enrichments', [
-                    'history_and_heritage'  => $data['history_and_heritage']  ?? null,
-                    'when_to_wear'          => $data['when_to_wear']          ?? null,
-                    'right_occasion'        => json_encode($data['right_occasion'] ?? []),
-                    'style_recommendations' => json_encode($data['style_recommendations'] ?? []),
-                    'material_story'        => $data['material_story']        ?? null,
-                    'craftsmanship_notes'   => $data['craftsmanship_notes']   ?? null,
-                    'raw_ai_response'       => $raw,
-                ], 'product_id = ?', [$productId]);
+                $this->db->update('product_enrichments', $row, 'product_id = ?', [$productId]);
             } else {
-                $this->db->insert('product_enrichments', [
-                    'product_id'            => $productId,
-                    'history_and_heritage'  => $data['history_and_heritage']  ?? null,
-                    'when_to_wear'          => $data['when_to_wear']          ?? null,
-                    'right_occasion'        => json_encode($data['right_occasion'] ?? []),
-                    'style_recommendations' => json_encode($data['style_recommendations'] ?? []),
-                    'material_story'        => $data['material_story']        ?? null,
-                    'craftsmanship_notes'   => $data['craftsmanship_notes']   ?? null,
-                    'raw_ai_response'       => $raw,
-                ]);
+                $this->db->insert('product_enrichments', array_merge(['product_id' => $productId], $row));
             }
 
             $this->db->update('products', [
@@ -89,6 +87,7 @@ final class AIEnrichmentService
             ], 'id = ?', [$productId]);
 
             return true;
+
         } catch (\Throwable $e) {
             error_log("[AIEnrichment] Failed for $productId: " . $e->getMessage());
             return false;
@@ -124,18 +123,14 @@ Product details:
 Generate a luxury product narrative as a JSON object with these exact keys:
 
 {
-  "history_and_heritage": "3-4 sentences. The origin story, historical significance, or design DNA behind this silhouette, fabric, or archetype. Reference the house's founding philosophy, archival references, or textile geography where relevant.",
-  "when_to_wear": "2-3 sentences. Micro-guidance on timing, seasonality, and styling dynamics. Describe the emotional register and dress code context.",
+  "history_and_heritage": "3-4 sentences. The origin story, historical significance, or design DNA behind this silhouette, fabric, or archetype.",
+  "when_to_wear": "2-3 sentences. Micro-guidance on timing, seasonality, and styling dynamics.",
   "right_occasion": ["Black Tie Gala", "Mediterranean Riviera Resort", "Apres-Ski Lounge"],
   "style_recommendations": [
-    {
-      "item": "Item name",
-      "category": "Category",
-      "reason": "One sentence on why it completes the look"
-    }
+    { "item": "Item name", "category": "Category", "reason": "One sentence on why it completes the look" }
   ],
-  "material_story": "2 sentences on the craftsmanship, fabric origin, or construction technique that elevates this piece.",
-  "craftsmanship_notes": "1-2 sentences on the artisanal detail, finishing, or heritage technique that distinguishes it."
+  "material_story": "2 sentences on the craftsmanship, fabric origin, or construction technique.",
+  "craftsmanship_notes": "1-2 sentences on the artisanal detail or finishing technique."
 }
 
 Return 3-4 occasion strings and 3 style recommendation objects.
@@ -144,9 +139,8 @@ PROMPT;
 
     private function parseResponse(string $raw): ?array
     {
-        // Strip any accidental markdown fences
-        $raw = preg_replace('/^```(?:json)?\s*/m', '', $raw);
-        $raw = preg_replace('/\s*```$/m', '', $raw);
+        $raw  = preg_replace('/^```(?:json)?\s*/m', '', $raw);
+        $raw  = preg_replace('/\s*```$/m', '', $raw);
         $data = json_decode(trim($raw), true);
         return is_array($data) ? $data : null;
     }
