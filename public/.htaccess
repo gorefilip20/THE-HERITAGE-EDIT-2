@@ -1,0 +1,25 @@
+Options -MultiViews
+RewriteEngine On
+
+# Security headers
+Header always set X-Frame-Options "SAMEORIGIN"
+Header always set X-Content-Type-Options "nosniff"
+Header always set Referrer-Policy "strict-origin-when-cross-origin"
+Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.paystack.co https://cdn.tailwindcss.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://api.paystack.co;"
+
+# Block access to sensitive files
+RewriteRule ^\.env.*$ - [F,L]
+RewriteRule ^composer\.(json|lock)$ - [F,L]
+RewriteRule ^src/ - [F,L]
+RewriteRule ^config/ - [F,L]
+
+# Route all requests through index.php
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+# Cache static assets
+<FilesMatch "\.(css|js|png|jpg|jpeg|gif|webp|woff2|svg)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+</FilesMatch>

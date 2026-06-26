@@ -1,0 +1,26 @@
+# Environment
+.env
+.env.local
+
+# Composer
+/vendor/
+
+# Uploaded assets (user-generated content)
+/public/assets/images/products/
+
+# Logs
+*.log
+/logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PHP cache
+*.cache
